@@ -100,7 +100,7 @@ struct BoardGrid: View {
                     }
                     .frame(width: cellSize, height: cellSize)
                     .contentShape(Rectangle())
-                    .onTapGesture { onCellTap(GridPoint(x: col, y: row)) }
+                    
                 }
             }
         }
@@ -411,15 +411,24 @@ struct GameScreen: View {
     }
 
     // Both the visual ghost and final placement use this exact projection.
-    // Finger touches and boardRect are both measured in .global coordinates.
+    // The board and UIKit touches both use window/global coordinates.
+    // The lifted shape's CENTER is above the fingertip, exactly like the
+    // source game's drag: no tap-to-place is needed.
     private func proposedOrigin(at finger: CGPoint, shape: BlockShape) -> GridPoint? {
         guard boardRect.width > 1, game.side > 0 else { return nil }
         let pitch = (boardRect.width + cellGap) / CGFloat(game.side)
-        let blockCenter = CGPoint(x: finger.x, y: finger.y - fingerLift)
-        let x = Int(round((blockCenter.x - boardRect.minX) / pitch - CGFloat(shape.width) / 2))
-        let y = Int(round((blockCenter.y - boardRect.minY) / pitch - CGFloat(shape.height) / 2))
-        guard x >= 0, y >= 0, x + shape.width <= game.side,
-              y + shape.height <= game.side else { return nil }
+        let liftedCenter = CGPoint(x: finger.x, y: finger.y - fingerLift)
+        let boardCenterX = boardRect.minX + boardRect.width / 2
+        let boardCenterY = boardRect.minY + boardRect.height / 2
+        // Stay inactive while the piece is in the tray. Once its lifted center
+        // approaches the board, clamp near-edge anchors instead of rejecting
+        // placements merely because the user's thumb is a few points offscreen.
+        guard abs(liftedCenter.x - boardCenterX) <= boardRect.width / 2 + pitch,
+              abs(liftedCenter.y - boardCenterY) <= boardRect.height / 2 + pitch else { return nil }
+        let rawX = Int(round((liftedCenter.x - boardRect.minX) / pitch - CGFloat(shape.width) / 2))
+        let rawY = Int(round((liftedCenter.y - boardRect.minY) / pitch - CGFloat(shape.height) / 2))
+        let x = min(max(0, rawX), game.side - shape.width)
+        let y = min(max(0, rawY), game.side - shape.height)
         return GridPoint(x: x, y: y)
     }
 
@@ -449,12 +458,18 @@ struct GameScreen: View {
             hover = proposedOrigin(at: location, shape: shape)
         case .ended:
             guard dragSlot == slot else { return }
+            // Commit the SAME legal anchor that was previewed on the board.
+            // Never silently turn a visible red/invalid preview into a move.
             let target = proposedOrigin(at: location, shape: shape)
+            let valid = target.flatMap { anchor in
+                game.canPlace(slot: slot, x: anchor.x, y: anchor.y) ? anchor : nil
+            }
             clearDrag()
-            if let target {
-                place(slot: slot, at: target)
+            if let valid {
+                place(slot: slot, at: valid)
+            } else if target != nil {
+                store.invalidDrop()
             } else {
-                // Tapping can still select a piece for accessibility.
                 selectedSlot = slot
             }
         case .cancelled:
