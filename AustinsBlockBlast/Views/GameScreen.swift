@@ -12,6 +12,9 @@ struct BoardGrid: View {
     let hovering: GridPoint?
     let hoveringShape: BlockShape?
     let onCellTap: (GridPoint) -> Void
+    let clearedRows: Set<Int>
+    let clearedColumns: Set<Int>
+    let boardBurst: Bool
 
     private var legalHover: Bool {
         guard let hovering, let hoveringShape else { return false }
@@ -46,6 +49,14 @@ struct BoardGrid: View {
                                     RoundedRectangle(cornerRadius: 5)
                                         .strokeBorder(legalHover ? GameTheme.green : GameTheme.coral, lineWidth: 1.5)
                                 }
+                        }
+                    }
+                    .overlay {
+                        if clearedRows.contains(row) || clearedColumns.contains(col) {
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(GameTheme.cyan.opacity(0.78))
+                                .shadow(color: GameTheme.cyan, radius: 12)
+                                .transition(.opacity)
                         }
                     }
                     .frame(width: cellSize, height: cellSize)
@@ -109,6 +120,10 @@ struct GameScreen: View {
     @State private var boardRect = CGRect.zero
     @State private var dragPosition: CGPoint?
     @State private var showRestart = false
+    @State private var clearingRows: Set<Int> = []
+    @State private var clearingColumns: Set<Int> = []
+    @State private var boardBurst = false
+    @State private var effectGeneration = 0
 
     // Board coordinates and touch locations are measured in the same GLOBAL space,
     // rather than mixing a tray-local gesture point with a board-relative frame.
@@ -134,11 +149,13 @@ struct GameScreen: View {
                     statsBar
                     if game.mode != .arcade { goalPanel }
                     Spacer(minLength: 0)
-                    BoardGrid(game: game, hovering: hover, hoveringShape: activeShape, onCellTap: tappedBoard)
+                    BoardGrid(game: game, hovering: hover, hoveringShape: activeShape,
+                              onCellTap: tappedBoard, clearedRows: clearingRows,
+                              clearedColumns: clearingColumns, boardBurst: boardBurst)
                         .frame(width: boardWidth, height: boardWidth)
                         .background(GeometryReader { view in
                             Color.clear.preference(key: BoardRectPreference.self,
-                                                   value: view.frame(in: .global))
+                                                   value: view.frame(in: .named("gameArea")))
                         })
                         .padding(7)
                         .background(GameTheme.panel, in: RoundedRectangle(cornerRadius: 17))
@@ -147,6 +164,21 @@ struct GameScreen: View {
                                 .strokeBorder(GameTheme.outline.opacity(0.7), lineWidth: 1.2)
                         }
                         .onPreferenceChange(BoardRectPreference.self) { boardRect = $0 }
+                        .overlay {
+                            if boardBurst {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 22)
+                                        .strokeBorder(GameTheme.yellow, lineWidth: 6)
+                                        .shadow(color: GameTheme.yellow, radius: 25)
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 74, weight: .bold))
+                                        .foregroundStyle(GameTheme.yellow)
+                                        .shadow(color: GameTheme.cyan, radius: 20)
+                                }
+                                .allowsHitTesting(false)
+                                .transition(.opacity.combined(with: .scale(scale: 0.7)))
+                            }
+                        }
                     Spacer(minLength: 0)
                     trayView(availableWidth: geometry.size.width - 32)
                     toolbar
@@ -161,8 +193,8 @@ struct GameScreen: View {
                     let gridCell = max(14, (boardWidth - CGFloat(game.side - 1) * cellGap) / CGFloat(game.side))
                     LiftedPiecePreview(shape: shape, cellSize: gridCell + cellGap)
                         .opacity(0.93)
-                        .position(x: dragPosition.x - geometry.frame(in: .global).minX,
-                                  y: dragPosition.y - fingerLift - geometry.frame(in: .global).minY)
+                        .position(x: dragPosition.x,
+                                  y: dragPosition.y - fingerLift)
                         .allowsHitTesting(false)
                         .zIndex(5)
                 }
@@ -170,6 +202,7 @@ struct GameScreen: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background { GameBackdrop() }
+            .coordinateSpace(name: "gameArea")
             .clipped()
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -267,7 +300,7 @@ struct GameScreen: View {
                 // DragGesture stays active even when the finger leaves this slot.
                 // Taps are still supported for accessible two-tap placement.
                 .highPriorityGesture(
-                    DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("gameArea"))
                         .onChanged { value in
                             guard let shape, !game.isOver else { return }
                             if dragSlot != slot || selectedSlot != slot {
@@ -280,16 +313,14 @@ struct GameScreen: View {
                         }
                         .onEnded { value in
                             guard let shape, !game.isOver else { clearDrag(); return }
-                            // A short touch selects the piece.  A real swipe moves it.
                             let moved = hypot(value.translation.width, value.translation.height)
-                            let target = moved >= 9 ? proposedOrigin(at: value.location, shape: shape) : nil
+                            let target = moved >= 8 ? proposedOrigin(at: value.location, shape: shape) : nil
                             clearDrag()
                             selectedSlot = slot
                             if let target {
                                 place(slot: slot, at: target)
-                            } else if moved >= 9 && boardRect.contains(CGPoint(x: value.location.x,
-                                                                                 y: value.location.y - fingerLift)) {
-                                // Illegal placement: return piece to tray, keep selection.
+                            } else if moved >= 8 {
+                                // Rejected drops return the piece to its tray slot.
                                 store.invalidDrop()
                             }
                         }
@@ -358,16 +389,30 @@ struct GameScreen: View {
     }
 
     private func proposedOrigin(at location: CGPoint, shape: BlockShape) -> GridPoint? {
-        guard boardRect.width > 1, game.side > 0 else { return nil }
+        guard boardRect.width > 1, boardRect.height > 1, game.side > 0 else { return nil }
+        let cellPitch = boardRect.width / CGFloat(game.side)
+        // The center of the piece rides above the fingertip, just like a
+        // block-fitting puzzle. Use the SAME anchor during preview and drop.
         let lifted = CGPoint(x: location.x, y: location.y - fingerLift)
-        guard boardRect.contains(lifted) else { return nil }
-        let cell = (boardRect.width - CGFloat(game.side - 1) * cellGap) / CGFloat(game.side)
-        let pitch = cell + cellGap
-        // The centre of the actual shape (not the top-left corner) follows the
-        // drag preview. The anchor snaps to the nearest board cell.
-        let x = Int(round((lifted.x - boardRect.minX - cell / 2 - CGFloat(shape.width - 1) * pitch / 2) / pitch))
-        let y = Int(round((lifted.y - boardRect.minY - cell / 2 - CGFloat(shape.height - 1) * pitch / 2) / pitch))
-        return GridPoint(x: x, y: y)
+        let shapeHalfWidth = CGFloat(shape.width) * cellPitch / 2
+        let shapeHalfHeight = CGFloat(shape.height) * cellPitch / 2
+        let x = Int(round((lifted.x - boardRect.minX - shapeHalfWidth) / cellPitch))
+        let y = Int(round((lifted.y - boardRect.minY - shapeHalfHeight) / cellPitch))
+        // The lifted position takes priority, but also accept a finger directly
+        // on the board if the player drags the piece without lifting their thumb
+        // high enough. Both paths calculate whole-piece, not single-cell, anchors.
+        if x >= 0, y >= 0,
+           x + shape.width <= game.side, y + shape.height <= game.side {
+            return GridPoint(x: x, y: y)
+        }
+        let touchX = Int(round((location.x - boardRect.minX - shapeHalfWidth) / cellPitch))
+        let touchY = Int(round((location.y - boardRect.minY - shapeHalfHeight) / cellPitch))
+        if touchX >= 0, touchY >= 0,
+           touchX + shape.width <= game.side,
+           touchY + shape.height <= game.side {
+            return GridPoint(x: touchX, y: touchY)
+        }
+        return nil
     }
 
     private func clearDrag() {
@@ -382,15 +427,57 @@ struct GameScreen: View {
     }
 
     private func place(slot: Int, at point: GridPoint) {
-        guard store.place(slot: slot, x: point.x, y: point.y) != nil else {
+        // Calculate exactly which lines this move completes BEFORE the engine clears them.
+        let oldGame = game
+        guard let piece = oldGame.shape(in: slot) else { return }
+        var occupied = oldGame.board.map { $0 != nil }
+        for cell in piece.cells {
+            let x = point.x + cell.x
+            let y = point.y + cell.y
+            guard (0..<oldGame.side).contains(x), (0..<oldGame.side).contains(y) else {
+                store.invalidDrop()
+                return
+            }
+            occupied[y * oldGame.side + x] = true
+        }
+        guard let result = store.place(slot: slot, x: point.x, y: point.y) else {
             store.invalidDrop()
             return
         }
         selectedSlot = nil
         clearDrag()
+        if result.lines > 0 {
+            let side = oldGame.side
+            let rows = Set((0..<side).filter { y in
+                (0..<side).allSatisfy { x in occupied[y * side + x] }
+            })
+            let columns = Set((0..<side).filter { x in
+                (0..<side).allSatisfy { y in occupied[y * side + x] }
+            })
+            effectGeneration += 1
+            let generation = effectGeneration
+            withAnimation(.easeOut(duration: 0.16)) {
+                clearingRows = rows
+                clearingColumns = columns
+                boardBurst = game.board.allSatisfy { $0 == nil }
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                guard generation == effectGeneration else { return }
+                withAnimation(.easeOut(duration: 0.22)) {
+                    clearingRows = []
+                    clearingColumns = []
+                    boardBurst = false
+                }
+            }
+        }
     }
 
     private func restart() {
+        effectGeneration += 1
+        clearingRows = []
+        clearingColumns = []
+        boardBurst = false
         store.newGame()
         selectedSlot = nil
         clearDrag()
