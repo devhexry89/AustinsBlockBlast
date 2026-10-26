@@ -3,6 +3,75 @@ import SwiftUI
 import UIKit
 import AudioToolbox
 
+enum GameFeedback {
+    private static var soundsEnabled: Bool { UserDefaults.standard.object(forKey: "abb_sound") as? Bool ?? true }
+    private static var hapticsEnabled: Bool { UserDefaults.standard.object(forKey: "abb_haptics") as? Bool ?? true }
+
+    private enum Sound: SystemSoundID {
+        case menu = 1104
+        case select = 1155
+        case place = 1105
+        case clear = 1111
+        case invalid = 1053
+        case restart = 1106
+        case win = 1025
+        case lose = 1073
+        case unlock = 1025
+        case theme = 1113
+    }
+
+    private static func play(_ sound: Sound) {
+        guard soundsEnabled else { return }
+        AudioServicesPlaySystemSound(sound.rawValue)
+    }
+
+    static func menuTap() {
+        if hapticsEnabled { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        play(.menu)
+    }
+
+    static func selectPiece() {
+        if hapticsEnabled { UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.65) }
+        play(.select)
+    }
+
+    static func validPlacement(clearedLines: Bool, ended: Bool, won: Bool) {
+        if ended {
+            if hapticsEnabled {
+                won ? UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    : UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+            play(won ? .win : .lose)
+        } else if clearedLines {
+            if hapticsEnabled { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+            play(.clear)
+        } else {
+            if hapticsEnabled { UIImpactFeedbackGenerator(style: .rigid).impactOccurred() }
+            play(.place)
+        }
+    }
+
+    static func invalidAction() {
+        if hapticsEnabled { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+        play(.invalid)
+    }
+
+    static func restart() {
+        if hapticsEnabled { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+        play(.restart)
+    }
+
+    static func themeSelected() {
+        if hapticsEnabled { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
+        play(.theme)
+    }
+
+    static func unlockedTheme() {
+        if hapticsEnabled { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+        play(.unlock)
+    }
+}
+
 @MainActor
 final class GameStore: ObservableObject {
     @Published private(set) var game: BlockGame
@@ -41,17 +110,25 @@ final class GameStore: ObservableObject {
         canUndo = true
         game = updated
         lastPoints = result.points
+        let newlyUnlockedThemes = newlyUnlockedThemeIDs(after: updated)
         persist()
-        if hapticsEnabled {
-            if result.lines > 0 { UINotificationFeedbackGenerator().notificationOccurred(.success) }
-            else { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        GameFeedback.validPlacement(clearedLines: result.lines > 0,
+                                    ended: result.gameFinished,
+                                    won: result.won)
+        if !newlyUnlockedThemes.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                GameFeedback.unlockedTheme()
+            }
         }
-        if soundsEnabled { AudioServicesPlaySystemSound(result.lines > 0 ? 1104 : 1105) }
         return result
     }
 
+    func selectPiece() {
+        GameFeedback.selectPiece()
+    }
+
     func invalidDrop() {
-        if hapticsEnabled { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+        GameFeedback.invalidAction()
     }
 
     func undo() {
@@ -62,7 +139,7 @@ final class GameStore: ObservableObject {
         canUndo = false
         lastPoints = 0
         persist()
-        if hapticsEnabled { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
+        GameFeedback.restart()
     }
 
     func newGame() {
@@ -73,7 +150,7 @@ final class GameStore: ObservableObject {
         canUndo = false
         lastPoints = 0
         persist()
-        if hapticsEnabled { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+        GameFeedback.restart()
     }
 
     private func persist() {
@@ -84,6 +161,32 @@ final class GameStore: ObservableObject {
                 .split(separator: ",").map(String.init))
             days.insert(day)
             UserDefaults.standard.set(days.sorted().joined(separator: ","), forKey: "abb_daily_completed_v1")
+        }
+        if game.didWin {
+            UserDefaults.standard.set(true, forKey: "abb_mode_win_\(game.mode.rawValue)")
+        }
+    }
+
+    private func newlyUnlockedThemeIDs(after updated: BlockGame) -> [String] {
+        let beforeProgress = ThemeProgress.current()
+        let afterDefaults = UserDefaults.standard
+        var daySet = Set((afterDefaults.string(forKey: "abb_daily_completed_v1") ?? "")
+            .split(separator: ",").map(String.init))
+        if updated.mode == .daily, updated.didWin, let day = updated.dayKey {
+            daySet.insert(day)
+        }
+        let afterProgress = ThemeProgress(
+            classicBest: max(updated.mode == .arcade ? updated.best : afterDefaults.integer(forKey: "abb_best_v2_arcade"), afterDefaults.integer(forKey: "abb_best_v2_arcade")),
+            dailyCompletions: daySet.count,
+            lineRushWon: afterDefaults.bool(forKey: "abb_mode_win_lineRush") || (updated.mode == .lineRush && updated.didWin),
+            scoreSprintWon: afterDefaults.bool(forKey: "abb_mode_win_scoreSprint") || (updated.mode == .scoreSprint && updated.didWin),
+            pocketWon: afterDefaults.bool(forKey: "abb_mode_win_pocket") || (updated.mode == .pocket && updated.didWin)
+        )
+
+        return ThemeCatalog.themes.compactMap { theme in
+            let wasUnlocked = theme.unlockRule.isUnlocked(progress: beforeProgress)
+            let nowUnlocked = theme.unlockRule.isUnlocked(progress: afterProgress)
+            return !wasUnlocked && nowUnlocked ? theme.id : nil
         }
     }
 }

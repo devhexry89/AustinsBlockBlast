@@ -58,6 +58,28 @@ struct BoardGrid: View {
     }
 }
 
+// Large, noninteractive copy that follows the finger while a piece is being dragged.
+// A raised preview leaves the destination cells visible above the user's thumb.
+struct LiftedPiecePreview: View {
+    let shape: BlockShape
+    let cellSize: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(shape.cells, id: \.self) { cell in
+                GlowTile(color: GameTheme.block(shape.color))
+                    .frame(width: cellSize - 3, height: cellSize - 3)
+                    .offset(x: CGFloat(cell.x) * cellSize, y: CGFloat(cell.y) * cellSize)
+            }
+        }
+        .frame(width: CGFloat(shape.width) * cellSize,
+               height: CGFloat(shape.height) * cellSize,
+               alignment: .topLeading)
+        .shadow(color: GameTheme.cyan.opacity(0.28), radius: 15, y: 7)
+        .allowsHitTesting(false)
+    }
+}
+
 struct PiecePreview: View {
     let shape: BlockShape
     let availableWidth: CGFloat
@@ -85,7 +107,13 @@ struct GameScreen: View {
     @State private var dragSlot: Int?
     @State private var hover: GridPoint?
     @State private var boardRect = CGRect.zero
+    @State private var dragPosition: CGPoint?
     @State private var showRestart = false
+
+    // Board coordinates and touch locations are measured in the same GLOBAL space,
+    // rather than mixing a tray-local gesture point with a board-relative frame.
+    private let fingerLift: CGFloat = 78
+    private let cellGap: CGFloat = 3
 
     init(mode: PlayMode, dayKey: String? = nil) {
         _store = StateObject(wrappedValue: GameStore(mode: mode, requestedDay: dayKey))
@@ -111,7 +139,7 @@ struct GameScreen: View {
                         .frame(width: boardWidth, height: boardWidth)
                         .background(GeometryReader { view in
                             Color.clear.preference(key: BoardRectPreference.self,
-                                                   value: view.frame(in: .named("gameArea")))
+                                                   value: view.frame(in: .global))
                         })
                         .padding(7)
                         .background(GameTheme.panel, in: RoundedRectangle(cornerRadius: 17))
@@ -121,20 +149,25 @@ struct GameScreen: View {
                         }
                         .onPreferenceChange(BoardRectPreference.self) { boardRect = $0 }
                     Spacer(minLength: 0)
-                    Text(selectedSlot == nil ? "DRAG A SHAPE ONTO THE BOARD" : "DRAG OR TAP THE TOP-LEFT CELL")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .tracking(1.3)
-                        .foregroundStyle(GameTheme.muted)
-                        .padding(.top, 2)
                     trayView(availableWidth: geometry.size.width - 32)
                     toolbar
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
 
-                if game.isOver { endOverlay }
+                // The moving piece is drawn above the entire game view so it cannot
+                // get clipped by the three slots or hidden behind the board.
+                if let dragPosition, let shape = activeShape, !game.isOver {
+                    let gridCell = max(14, (boardWidth - CGFloat(game.side - 1) * cellGap) / CGFloat(game.side))
+                    LiftedPiecePreview(shape: shape, cellSize: gridCell + cellGap)
+                        .opacity(0.93)
+                        .position(x: dragPosition.x - geometry.frame(in: .global).minX,
+                                  y: dragPosition.y - fingerLift - geometry.frame(in: .global).minY)
+                        .allowsHitTesting(false)
+                        .zIndex(5)
+                }
+                if game.isOver { endOverlay.zIndex(10) }
             }
-            .coordinateSpace(name: "gameArea")
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden()
@@ -227,22 +260,35 @@ struct GameScreen: View {
                 }
                 .frame(width: slotWidth, height: 87)
                 .contentShape(RoundedRectangle(cornerRadius: 18))
-                .onTapGesture { if shape != nil { selectedSlot = slot } }
-                .gesture(
-                    DragGesture(minimumDistance: 6, coordinateSpace: .named("gameArea"))
+                // Start tracking as soon as the finger touches the piece.  SwiftUI's
+                // DragGesture stays active even when the finger leaves this slot.
+                // Taps are still supported for accessible two-tap placement.
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .global)
                         .onChanged { value in
-                            guard let shape else { return }
+                            guard let shape, !game.isOver else { return }
+                            if dragSlot != slot || selectedSlot != slot {
+                                store.selectPiece()
+                            }
                             selectedSlot = slot
                             dragSlot = slot
+                            dragPosition = value.location
                             hover = proposedOrigin(at: value.location, shape: shape)
                         }
                         .onEnded { value in
-                            guard let shape else { return }
-                            let origin = proposedOrigin(at: value.location, shape: shape)
-                            dragSlot = nil
-                            hover = nil
-                            if let origin { place(slot: slot, at: origin) }
-                            else { store.invalidDrop() }
+                            guard let shape, !game.isOver else { clearDrag(); return }
+                            // A short touch selects the piece.  A real swipe moves it.
+                            let moved = hypot(value.translation.width, value.translation.height)
+                            let target = moved >= 9 ? proposedOrigin(at: value.location, shape: shape) : nil
+                            clearDrag()
+                            selectedSlot = slot
+                            if let target {
+                                place(slot: slot, at: target)
+                            } else if moved >= 9 && boardRect.contains(CGPoint(x: value.location.x,
+                                                                                 y: value.location.y - fingerLift)) {
+                                // Illegal placement: return piece to tray, keep selection.
+                                store.invalidDrop()
+                            }
                         }
                 )
                 .accessibilityLabel(shape.map { "Piece \(slot + 1), \($0.cells.count) blocks" } ?? "Empty piece slot")
@@ -251,16 +297,9 @@ struct GameScreen: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 12) {
-            Button { store.undo(); selectedSlot = nil; dragSlot = nil; hover = nil } label: {
-                Label("UNDO", systemImage: "arrow.uturn.backward")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(!store.canUndo)
-            Button { showRestart = true } label: {
-                Label("RESTART", systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
-            }
+        Button { showRestart = true } label: {
+            Label("RESTART", systemImage: "arrow.clockwise")
+                .frame(maxWidth: .infinity)
         }
         .font(.system(size: 12, weight: .heavy, design: .rounded))
         .foregroundStyle(.white)
@@ -316,14 +355,22 @@ struct GameScreen: View {
     }
 
     private func proposedOrigin(at location: CGPoint, shape: BlockShape) -> GridPoint? {
-        guard boardRect.width > 1 else { return nil }
-        // The lifted piece sits above the player's thumb while dragging.
-        let lifted = CGPoint(x: location.x, y: location.y - 52)
-        guard boardRect.insetBy(dx: -4, dy: -4).contains(lifted) else { return nil }
-        let strideSize = boardRect.width / CGFloat(game.side)
-        let col = Int(floor((lifted.x - boardRect.minX) / strideSize))
-        let row = Int(floor((lifted.y - boardRect.minY) / strideSize))
-        return GridPoint(x: col - shape.width / 2, y: row - shape.height / 2)
+        guard boardRect.width > 1, game.side > 0 else { return nil }
+        let lifted = CGPoint(x: location.x, y: location.y - fingerLift)
+        guard boardRect.contains(lifted) else { return nil }
+        let cell = (boardRect.width - CGFloat(game.side - 1) * cellGap) / CGFloat(game.side)
+        let pitch = cell + cellGap
+        // The centre of the actual shape (not the top-left corner) follows the
+        // drag preview. The anchor snaps to the nearest board cell.
+        let x = Int(round((lifted.x - boardRect.minX - cell / 2 - CGFloat(shape.width - 1) * pitch / 2) / pitch))
+        let y = Int(round((lifted.y - boardRect.minY - cell / 2 - CGFloat(shape.height - 1) * pitch / 2) / pitch))
+        return GridPoint(x: x, y: y)
+    }
+
+    private func clearDrag() {
+        dragSlot = nil
+        dragPosition = nil
+        hover = nil
     }
 
     private func tappedBoard(_ cell: GridPoint) {
@@ -337,14 +384,12 @@ struct GameScreen: View {
             return
         }
         selectedSlot = nil
-        dragSlot = nil
-        hover = nil
+        clearDrag()
     }
 
     private func restart() {
         store.newGame()
         selectedSlot = nil
-        dragSlot = nil
-        hover = nil
+        clearDrag()
     }
 }

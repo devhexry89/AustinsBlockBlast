@@ -5,11 +5,19 @@ struct HomeScreen: View {
     @AppStorage("abb_daily_completed_v1") private var completedDates = ""
     @AppStorage("abb_haptics") private var hapticsEnabled = true
     @AppStorage("abb_sound") private var soundsEnabled = true
+    @AppStorage("abb_selected_theme") private var selectedTheme = ThemeCatalog.default
+
     @State private var showSettings = false
+    @State private var lockedThemeMessage = ""
+    @State private var showLockedThemeAlert = false
 
     private var dailyFinished: Bool {
         Set(completedDates.split(separator: ",").map(String.init))
             .contains(DailyChallenge.dayKey())
+    }
+
+    private var progress: ThemeProgress {
+        ThemeProgress.current()
     }
 
     var body: some View {
@@ -61,6 +69,7 @@ struct HomeScreen: View {
                                 in: RoundedRectangle(cornerRadius: 24)
                             )
                         }
+                        .simultaneousGesture(TapGesture().onEnded { GameFeedback.menuTap() })
                         .buttonStyle(.plain)
 
                         VStack(alignment: .leading, spacing: 11) {
@@ -73,6 +82,7 @@ struct HomeScreen: View {
                                             subtitle: dailyFinished ? "Replay today's puzzle or see your week" : "Same date, same seed. Earn your daily star.",
                                             color: GameTheme.yellow, isBig: true)
                             }
+                            .simultaneousGesture(TapGesture().onEnded { GameFeedback.menuTap() })
                             .buttonStyle(.plain)
                         }
 
@@ -87,25 +97,47 @@ struct HomeScreen: View {
                                                 subtitle: mode.subtitle,
                                                 color: accent(for: mode))
                                 }
+                                .simultaneousGesture(TapGesture().onEnded { GameFeedback.menuTap() })
                                 .buttonStyle(.plain)
                             }
                         }
 
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: "checkmark.shield.fill")
-                                .foregroundStyle(GameTheme.green)
-                                .font(.title3)
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("NO RIGGED DROPS")
-                                    .font(.system(size: 14, weight: .heavy, design: .rounded))
-                                    .foregroundStyle(.white)
-                                Text("No ads, no pay-to-win, and no score-based difficulty manipulation. Fair pieces, readable rules.")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(GameTheme.muted)
+                        VStack(alignment: .leading, spacing: 11) {
+                            HStack {
+                                SectionEyebrow(title: "Unlockable board themes")
+                                Spacer()
+                                Text(ThemeCatalog.theme(named: selectedTheme).name)
+                                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                                    .foregroundStyle(GameTheme.yellow)
                             }
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 13) {
+                                    ForEach(ThemeCatalog.themes) { theme in
+                                        let unlocked = theme.unlockRule.isUnlocked(progress: progress)
+                                        Button {
+                                            if unlocked {
+                                                selectedTheme = theme.id
+                                                GameFeedback.themeSelected()
+                                            } else {
+                                                lockedThemeMessage = "\(theme.name) is locked. \(theme.unlockRule.description(progress: progress))\n\nProgress: \(theme.unlockRule.progressLine(progress: progress))"
+                                                GameFeedback.invalidAction()
+                                                showLockedThemeAlert = true
+                                            }
+                                        } label: {
+                                            ThemeCard(theme: theme,
+                                                      unlocked: unlocked,
+                                                      selected: selectedTheme == theme.id,
+                                                      progress: progress)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.horizontal, 1)
+                            }
+                            Text("Unlock more looks by setting high scores and finishing daily challenges or mini games.")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(GameTheme.muted)
                         }
-                        .padding(16)
-                        .background(GameTheme.recessed, in: RoundedRectangle(cornerRadius: 17))
                     }
                     .padding(.horizontal, 21)
                     .padding(.top, 22)
@@ -114,6 +146,11 @@ struct HomeScreen: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showSettings) { settingsSheet }
+            .alert("Theme Locked", isPresented: $showLockedThemeAlert) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(lockedThemeMessage)
+            }
         }
     }
 
@@ -133,7 +170,10 @@ struct HomeScreen: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
-            Button { showSettings = true } label: {
+            Button {
+                GameFeedback.menuTap()
+                showSettings = true
+            } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 18))
                     .foregroundStyle(GameTheme.muted)
@@ -151,13 +191,18 @@ struct HomeScreen: View {
                     Toggle("Haptic feedback", isOn: $hapticsEnabled)
                     Toggle("Sound effects", isOn: $soundsEnabled)
                 }
+                Section("Theme progress") {
+                    Text("Current theme: \(ThemeCatalog.theme(named: selectedTheme).name)")
+                    Text("Daily challenges completed: \(progress.dailyCompletions)")
+                    Text("Mini games beaten: \([progress.lineRushWon, progress.scoreSprintWon, progress.pocketWon].filter { $0 }.count) / 3")
+                }
                 Section("Fair play") {
                     Text("Your score is never used to make piece generation harder. New sets are created using a seeded random generator and available board space. The generator looks for a playable three-piece sequence when possible. Bad moves can still end a game.")
                     Text("Daily puzzles use a date-based seed. Scores and completed challenges are saved on your iPhone.")
                     Text("No ads, in-app purchases, tracking, or network connection required.")
                 }
                 Section("About") {
-                    Text("Austins BlockBlast • Version 1.0")
+                    Text("Austins BlockBlast • Version 1.2")
                     Text("Original puzzle game inspired by classic block-fitting games.")
                 }
             }
