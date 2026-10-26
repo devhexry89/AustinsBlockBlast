@@ -7,6 +7,13 @@ private struct BoardRectPreference: PreferenceKey {
     }
 }
 
+private struct TrayFramesPreference: PreferenceKey {
+    static var defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
 struct BoardGrid: View {
     let game: BlockGame
     let hovering: GridPoint?
@@ -118,6 +125,7 @@ struct GameScreen: View {
     @State private var dragSlot: Int?
     @State private var hover: GridPoint?
     @State private var boardRect = CGRect.zero
+    @State private var trayRects: [Int: CGRect] = [:]
     @State private var dragPosition: CGPoint?
     @State private var showRestart = false
     @State private var clearingRows: Set<Int> = []
@@ -125,8 +133,8 @@ struct GameScreen: View {
     @State private var boardBurst = false
     @State private var effectGeneration = 0
 
-    // Board coordinates and touch locations are measured in the same GLOBAL space,
-    // rather than mixing a tray-local gesture point with a board-relative frame.
+    // All touch points and measured element frames use the global coordinate system.
+    // One parent-level gesture owns the entire drag lifecycle, even beyond the tray.
     private let fingerLift: CGFloat = 74
     private let cellGap: CGFloat = 3
 
@@ -155,7 +163,7 @@ struct GameScreen: View {
                         .frame(width: boardWidth, height: boardWidth)
                         .background(GeometryReader { view in
                             Color.clear.preference(key: BoardRectPreference.self,
-                                                   value: view.frame(in: .named("gameArea")))
+                                                   value: view.frame(in: .global))
                         })
                         .padding(7)
                         .background(GameTheme.panel, in: RoundedRectangle(cornerRadius: 17))
@@ -181,6 +189,7 @@ struct GameScreen: View {
                         }
                     Spacer(minLength: 0)
                     trayView(availableWidth: geometry.size.width - 32)
+                        .onPreferenceChange(TrayFramesPreference.self) { trayRects = $0 }
                     toolbar
                 }
                 .padding(.horizontal, 16)
@@ -197,6 +206,8 @@ struct GameScreen: View {
                             hover.map { snapCenter(for: $0, shape: shape) }
                             ?? CGPoint(x: dragPosition.x, y: dragPosition.y - fingerLift)
                         )
+                        .offset(x: -geometry.frame(in: .global).minX,
+                                y: -geometry.frame(in: .global).minY)
                         .allowsHitTesting(false)
                         .zIndex(5)
                 }
@@ -204,7 +215,16 @@ struct GameScreen: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background { GameBackdrop() }
-            .coordinateSpace(name: "gameArea")
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        handleDragChanged(value)
+                    }
+                    .onEnded { value in
+                        handleDragEnded(value)
+                    }
+            )
             .clipped()
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -298,36 +318,19 @@ struct GameScreen: View {
                     }
                 }
                 .frame(width: slotWidth, height: 87)
+                .background(GeometryReader { trayFrame in
+                    Color.clear.preference(
+                        key: TrayFramesPreference.self,
+                        value: [slot: trayFrame.frame(in: .global)]
+                    )
+                })
                 .contentShape(RoundedRectangle(cornerRadius: 18))
-                // Start tracking as soon as the finger touches the piece.  SwiftUI's
-                // DragGesture stays active even when the finger leaves this slot.
-                // Taps are still supported for accessible two-tap placement.
-                .highPriorityGesture(
-                    DragGesture(minimumDistance: 0, coordinateSpace: .named("gameArea"))
-                        .onChanged { value in
-                            guard let shape, !game.isOver else { return }
-                            if dragSlot != slot || selectedSlot != slot {
-                                store.selectPiece()
-                            }
-                            selectedSlot = slot
-                            dragSlot = slot
-                            dragPosition = value.location
-                            hover = proposedOrigin(at: value.location, shape: shape)
-                        }
-                        .onEnded { value in
-                            guard let shape, !game.isOver else { clearDrag(); return }
-                            let moved = hypot(value.translation.width, value.translation.height)
-                            let target = moved >= 8 ? proposedOrigin(at: value.location, shape: shape) : nil
-                            clearDrag()
-                            selectedSlot = slot
-                            if let target {
-                                place(slot: slot, at: target)
-                            } else if moved >= 8 {
-                                // Rejected drops return the piece to its tray slot.
-                                store.invalidDrop()
-                            }
-                        }
-                )
+                .onTapGesture {
+                    if shape != nil {
+                        selectedSlot = slot
+                        store.selectPiece()
+                    }
+                }
                 .accessibilityLabel(shape.map { "Piece \(slot + 1), \($0.cells.count) blocks" } ?? "Empty piece slot")
             }
         }
@@ -392,21 +395,13 @@ struct GameScreen: View {
     }
 
     // Both the visual ghost and final placement use this exact projection.
-    // The fingertip lives in the named gameArea coordinate space, as does boardRect.
+    // Finger touches and boardRect are both measured in .global coordinates.
     private func proposedOrigin(at finger: CGPoint, shape: BlockShape) -> GridPoint? {
-        guard boardRect.width > 0, boardRect.height > 0, game.side > 0 else { return nil }
-
+        guard boardRect.width > 1, game.side > 0 else { return nil }
         let pitch = (boardRect.width + cellGap) / CGFloat(game.side)
-        let center = CGPoint(x: finger.x, y: finger.y - fingerLift)
-
-        // The drag cursor is the CENTER of the lifted shape, not its top-left cell.
-        let left = center.x - CGFloat(shape.width) * pitch * 0.5
-        let top = center.y - CGFloat(shape.height) * pitch * 0.5
-        let x = Int(round((left - boardRect.minX) / pitch))
-        let y = Int(round((top - boardRect.minY) / pitch))
-
-        // Never place a piece partially outside the board. A ghost may still be
-        // shown in red over invalid cells, but it will not consume the piece.
+        let blockCenter = CGPoint(x: finger.x, y: finger.y - fingerLift)
+        let x = Int(round((blockCenter.x - boardRect.minX) / pitch - CGFloat(shape.width) / 2))
+        let y = Int(round((blockCenter.y - boardRect.minY) / pitch - CGFloat(shape.height) / 2))
         guard x >= 0, y >= 0, x + shape.width <= game.side,
               y + shape.height <= game.side else { return nil }
         return GridPoint(x: x, y: y)
@@ -418,6 +413,43 @@ struct GameScreen: View {
             x: boardRect.minX + (CGFloat(anchor.x) + CGFloat(shape.width) / 2) * pitch - cellGap / 2,
             y: boardRect.minY + (CGFloat(anchor.y) + CGFloat(shape.height) / 2) * pitch - cellGap / 2
         )
+    }
+
+    private func dragSlotForTouch(_ start: CGPoint) -> Int? {
+        (0..<3).first { slot in
+            guard let rect = trayRects[slot], game.shape(in: slot) != nil else { return false }
+            return rect.insetBy(dx: -4, dy: -8).contains(start)
+        }
+    }
+
+    private func handleDragChanged(_ value: DragGesture.Value) {
+        guard !game.isOver else { return }
+        guard let slot = dragSlot ?? dragSlotForTouch(value.startLocation),
+              let shape = game.shape(in: slot) else { return }
+        if dragSlot == nil {
+            selectedSlot = slot
+            dragSlot = slot
+            store.selectPiece()
+        }
+        dragPosition = value.location
+        hover = proposedOrigin(at: value.location, shape: shape)
+    }
+
+    private func handleDragEnded(_ value: DragGesture.Value) {
+        guard let slot = dragSlot,
+              let shape = game.shape(in: slot), !game.isOver else {
+            clearDrag()
+            return
+        }
+        let moved = hypot(value.translation.width, value.translation.height)
+        let target = moved > 8 ? proposedOrigin(at: value.location, shape: shape) : nil
+        clearDrag()
+        if let target {
+            // The exact same candidate used for the visual preview is committed.
+            place(slot: slot, at: target)
+        } else if moved > 8 {
+            store.invalidDrop()
+        }
     }
 
     private func clearDrag() {
