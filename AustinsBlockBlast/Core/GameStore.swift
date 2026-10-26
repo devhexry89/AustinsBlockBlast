@@ -16,7 +16,7 @@ enum GameFeedback {
         case restart = 1106
         case win = 1025
         case lose = 1073
-        case unlock = 1025
+        case unlock = 1112
         case theme = 1113
     }
 
