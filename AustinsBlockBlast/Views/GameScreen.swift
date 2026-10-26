@@ -235,17 +235,20 @@ struct GameScreen: View {
                               onCellTap: tappedBoard, clearedRows: clearingRows,
                               clearedColumns: clearingColumns, boardBurst: boardBurst)
                         .frame(width: boardWidth, height: boardWidth)
-                        .background(GeometryReader { view in
-                            Color.clear.preference(key: BoardRectPreference.self,
-                                                   value: view.frame(in: .global))
-                        })
+                        .background(
+                            GeometryReader { view in
+                                Color.clear
+                                    .preference(key: BoardRectPreference.self,
+                                                value: view.frame(in: .global))
+                            }
+                        )
+                        .onPreferenceChange(BoardRectPreference.self) { boardRect = $0 }
                         .padding(7)
                         .background(GameTheme.panel, in: RoundedRectangle(cornerRadius: 17))
                         .overlay {
                             RoundedRectangle(cornerRadius: 17)
                                 .strokeBorder(GameTheme.outline.opacity(0.7), lineWidth: 1.2)
                         }
-                        .onPreferenceChange(BoardRectPreference.self) { boardRect = $0 }
                         .overlay {
                             if boardBurst {
                                 ZStack {
@@ -499,7 +502,7 @@ struct GameScreen: View {
         hover = candidate
         if let candidate, game.canPlace(slot: slot, x: candidate.x, y: candidate.y) {
             lastLegalHover = candidate
-            touchStatus = "VALID \\(candidate.x),\\(candidate.y)"
+            touchStatus = "VALID \(candidate.x),\(candidate.y)"
         } else {
             lastLegalHover = nil
             touchStatus = candidate == nil ? "OUTSIDE BOARD" : "BLOCKED"
@@ -521,7 +524,7 @@ struct GameScreen: View {
         }
         if let final, game.canPlace(slot: slot, x: final.x, y: final.y) {
             place(slot: slot, at: final)
-            touchStatus = "PLACED \\(final.x),\\(final.y)"
+            touchStatus = "PLACED \(final.x),\(final.y)"
         } else {
             touchStatus = cancelled ? "CANCELLED / NO VALID SPOT" : "RELEASED / NO VALID SPOT"
             // Do not make the error noise for a drop outside the board.
@@ -539,7 +542,7 @@ struct GameScreen: View {
             dragSlot = slot
             lastLegalHover = nil
             didMoveOnThisTouch = false
-            touchStatus = "START \\(slot + 1)"
+            touchStatus = "START \(slot + 1)"
             updateDrag(slot: slot, shape: shape, at: location)
             store.selectPiece()
         case .moved:
