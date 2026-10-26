@@ -3,40 +3,79 @@ import UIKit
 
 // UIKit owns the touch for its full lifetime, even when the finger leaves the tray.
 // This avoids SwiftUI parent/child gesture competition and keeps one coordinate space.
-private struct PieceTouchSurface: UIViewRepresentable {
-    let onTouch: (TouchPhase, CGPoint) -> Void
+private struct GameTouchLayer: UIViewRepresentable {
+    let trayFrames: [Int: CGRect]
+    let onTouch: (Int, TouchPhase, CGPoint) -> Void
 
     enum TouchPhase { case began, moved, ended, cancelled }
 
     final class Surface: UIView {
-        var callback: (TouchPhase, CGPoint) -> Void = { _, _ in }
-        private func point(_ touch: UITouch) -> CGPoint {
-            // .global SwiftUI frames and UIWindow touch coordinates agree in this scene.
-            touch.location(in: window ?? self)
+        var frames: [Int: CGRect] = [:]
+        var callback: (Int, TouchPhase, CGPoint) -> Void = { _, _, _ in }
+        private var trackedSlot: Int?
+        private var trackedTouch: UITouch?
+
+        override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            // The overlay allows buttons, menus, and everything except tray pieces
+            // to receive their normal touches.
+            guard trackedTouch == nil, let window else { return false }
+            let position = convert(point, to: window)
+            return frames.values.contains { $0.contains(position) }
         }
+
+        private func report(_ phase: TouchPhase, touch: UITouch) {
+            guard let slot = trackedSlot else { return }
+            callback(slot, phase, touch.location(in: window ?? self))
+        }
+
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            if let touch = touches.first { callback(.began, point(touch)) }
+            guard trackedTouch == nil, let touch = touches.first else { return }
+            let position = touch.location(in: window ?? self)
+            guard let slot = frames.keys.sorted().first(where: { frames[$0]?.contains(position) == true }) else { return }
+            trackedSlot = slot
+            trackedTouch = touch
+            report(.began, touch: touch)
         }
+
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-            if let touch = touches.first { callback(.moved, point(touch)) }
+            guard let touch = trackedTouch, touches.contains(touch) else { return }
+            report(.moved, touch: touch)
         }
+
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-            if let touch = touches.first { callback(.ended, point(touch)) }
+            guard let touch = trackedTouch, touches.contains(touch) else { return }
+            report(.ended, touch: touch)
+            trackedTouch = nil
+            trackedSlot = nil
         }
+
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-            if let touch = touches.first { callback(.cancelled, point(touch)) }
+            guard let touch = trackedTouch, touches.contains(touch) else { return }
+            report(.cancelled, touch: touch)
+            trackedTouch = nil
+            trackedSlot = nil
         }
     }
 
     func makeUIView(context: Context) -> Surface {
-        let surface = Surface(frame: .zero)
-        surface.isMultipleTouchEnabled = false
-        surface.backgroundColor = .clear
-        surface.isUserInteractionEnabled = true
-        surface.callback = onTouch
-        return surface
+        let view = Surface()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = true
+        view.isMultipleTouchEnabled = false
+        return view
     }
-    func updateUIView(_ view: Surface, context: Context) { view.callback = onTouch }
+
+    func updateUIView(_ view: Surface, context: Context) {
+        view.frames = trayFrames
+        view.callback = onTouch
+    }
+}
+
+private struct TrayFramesPreference: PreferenceKey {
+    static var defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
 }
 
 private struct BoardRectPreference: PreferenceKey {
@@ -157,6 +196,8 @@ struct GameScreen: View {
     @State private var dragSlot: Int?
     @State private var hover: GridPoint?
     @State private var boardRect = CGRect.zero
+    @State private var trayFrames: [Int: CGRect] = [:]
+    @State private var touchStatus = "READY"
     @State private var dragPosition: CGPoint?
     @State private var showRestart = false
     @State private var clearingRows: Set<Int> = []
@@ -221,6 +262,10 @@ struct GameScreen: View {
                     Spacer(minLength: 0)
                     trayView(availableWidth: geometry.size.width - 32)
                     toolbar
+                    Text("TOUCH ENGINE 1.3 • \(touchStatus)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(GameTheme.muted)
+                        .frame(maxWidth: .infinity)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
@@ -241,8 +286,14 @@ struct GameScreen: View {
                         .allowsHitTesting(false)
                         .zIndex(5)
                 }
+                GameTouchLayer(trayFrames: trayFrames) { slot, phase, location in
+                    handlePieceTouch(slot: slot, phase: phase, location: location)
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .zIndex(8)
                 if game.isOver { endOverlay.zIndex(10) }
             }
+            .onPreferenceChange(TrayFramesPreference.self) { trayFrames = $0 }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background { GameBackdrop() }
             .contentShape(Rectangle())
@@ -339,14 +390,13 @@ struct GameScreen: View {
                     }
                 }
                 .frame(width: slotWidth, height: 87)
+                .background(GeometryReader { marker in
+                    Color.clear.preference(
+                        key: TrayFramesPreference.self,
+                        value: shape == nil ? [:] : [slot: marker.frame(in: .global)]
+                    )
+                })
                 .contentShape(RoundedRectangle(cornerRadius: 18))
-                .overlay {
-                    if shape != nil {
-                        PieceTouchSurface { phase, point in
-                            handlePieceTouch(slot: slot, phase: phase, location: point)
-                        }
-                    }
-                }
                 .accessibilityLabel(shape.map { "Piece \(slot + 1), \($0.cells.count) blocks" } ?? "Empty piece slot")
             }
         }
@@ -440,23 +490,26 @@ struct GameScreen: View {
         )
     }
 
-    private func handlePieceTouch(slot: Int, phase: PieceTouchSurface.TouchPhase, location: CGPoint) {
+    private func handlePieceTouch(slot: Int, phase: GameTouchLayer.TouchPhase, location: CGPoint) {
         guard !game.isOver, let shape = game.shape(in: slot) else {
             clearDrag()
             return
         }
         switch phase {
         case .began:
+            touchStatus = "START \(slot + 1)"
             selectedSlot = slot
             dragSlot = slot
             dragPosition = location
             hover = proposedOrigin(at: location, shape: shape)
             store.selectPiece()
         case .moved:
+            touchStatus = "MOVING \(slot + 1)"
             guard dragSlot == slot else { return }
             dragPosition = location
             hover = proposedOrigin(at: location, shape: shape)
         case .ended:
+            touchStatus = "RELEASED \(slot + 1)"
             guard dragSlot == slot else { return }
             // Commit the SAME legal anchor that was previewed on the board.
             // Never silently turn a visible red/invalid preview into a move.
@@ -466,13 +519,17 @@ struct GameScreen: View {
             }
             clearDrag()
             if let valid {
+                touchStatus = "PLACED \(valid.x),\(valid.y)"
                 place(slot: slot, at: valid)
             } else if target != nil {
+                touchStatus = "BLOCKED"
                 store.invalidDrop()
             } else {
-                selectedSlot = slot
+                touchStatus = "OUTSIDE BOARD"
+                selectedSlot = nil
             }
         case .cancelled:
+            touchStatus = "CANCELLED"
             clearDrag()
         }
     }
