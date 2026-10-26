@@ -199,6 +199,21 @@ struct HomeScreen: View {
                     Toggle("Haptic feedback", isOn: $hapticsEnabled)
                     Toggle("Sound effects", isOn: $soundsEnabled)
                 }
+
+                
+Section {
+    HStack(spacing: 8) {
+        Image(systemName: "heart.fill")
+            .foregroundStyle(.pink)
+
+        Text("I love you Rylee ❤️")
+            .font(.system(size: 16, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, 8)
+}
+
                 Section("Theme progress") {
                     Text("Current theme: \(ThemeCatalog.theme(named: selectedTheme).name)")
                     Text("Daily challenges completed: \(progress.dailyCompletions)")
