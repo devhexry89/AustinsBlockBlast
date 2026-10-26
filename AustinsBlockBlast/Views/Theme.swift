@@ -271,20 +271,28 @@ struct GameBackdrop: View {
     private var theme: ThemePalette { ThemeCatalog.current() }
 
     var body: some View {
-        ZStack {
-            theme.background
-            Image(theme.previewAssetName)
-                .resizable()
-                .scaledToFill()
-                .opacity(GameTheme.backgroundAssetOpacity)
-                .blur(radius: 18)
-                .ignoresSafeArea()
-            RadialGradient(colors: [theme.blue.opacity(0.22), .clear],
-                           center: .topLeading, startRadius: 10, endRadius: 520)
-            RadialGradient(colors: [theme.purple.opacity(0.18), .clear],
-                           center: .bottomTrailing, startRadius: 25, endRadius: 480)
+        GeometryReader { geometry in
+            ZStack {
+                theme.background
+                Image(theme.previewAssetName)
+                    .resizable()
+                    .scaledToFill()
+                    // The image must not determine the width of the parent view.
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .clipped()
+                    .opacity(GameTheme.backgroundAssetOpacity)
+                    .blur(radius: 18)
+                    .clipped()
+                RadialGradient(colors: [theme.blue.opacity(0.22), .clear],
+                               center: .topLeading, startRadius: 10, endRadius: 520)
+                RadialGradient(colors: [theme.purple.opacity(0.18), .clear],
+                               center: .bottomTrailing, startRadius: 25, endRadius: 480)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
         }
         .ignoresSafeArea()
+        .allowsHitTesting(false)
     }
 }
 

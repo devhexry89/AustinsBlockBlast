@@ -22,9 +22,9 @@ struct HomeScreen: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                GameBackdrop()
-                ScrollView(showsIndicators: false) {
+            GeometryReader { screen in
+                ZStack {
+                    ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 22) {
                         header
                         HStack(spacing: 12) {
@@ -134,6 +134,8 @@ struct HomeScreen: View {
                                 }
                                 .padding(.horizontal, 1)
                             }
+                            .frame(width: max(0, screen.size.width - 42))
+                            .clipped()
                             Text("Unlock more looks by setting high scores and finishing daily challenges or mini games.")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(GameTheme.muted)
@@ -142,7 +144,13 @@ struct HomeScreen: View {
                     .padding(.horizontal, 21)
                     .padding(.top, 22)
                     .padding(.bottom, 35)
+                    .frame(width: screen.size.width, alignment: .topLeading)
                 }
+                .frame(width: screen.size.width, height: screen.size.height)
+            }
+            .frame(width: screen.size.width, height: screen.size.height)
+            .background { GameBackdrop() }
+            .clipped()
             }
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showSettings) { settingsSheet }
@@ -202,7 +210,7 @@ struct HomeScreen: View {
                     Text("No ads, in-app purchases, tracking, or network connection required.")
                 }
                 Section("About") {
-                    Text("Austins BlockBlast • Version 1.2")
+                    Text("Austins BlockBlast • Version 1.2.2")
                     Text("Original puzzle game inspired by classic block-fitting games.")
                 }
             }

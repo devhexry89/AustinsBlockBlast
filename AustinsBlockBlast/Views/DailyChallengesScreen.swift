@@ -15,8 +15,7 @@ struct DailyChallengesScreen: View {
     }
 
     var body: some View {
-        ZStack {
-            GameBackdrop()
+        GeometryReader { screen in
             ScrollView {
                 VStack(alignment: .leading, spacing: 21) {
                     HStack {
@@ -72,7 +71,7 @@ struct DailyChallengesScreen: View {
                     .buttonStyle(.plain)
 
                     SectionEyebrow(title: "Last 7 days")
-                    HStack(spacing: 7) {
+                    HStack(spacing: 4) {
                         ForEach(lastSevenDays, id: \.self) { date in
                             let key = DailyChallenge.dayKey(for: date)
                             let achieved = completed.contains(key)
@@ -81,7 +80,9 @@ struct DailyChallengesScreen: View {
                             } label: {
                                 VStack(spacing: 8) {
                                     Text(date.formatted(.dateTime.weekday(.abbreviated)))
-                                        .font(.system(size: 10, weight: .bold))
+                                        .font(.system(size: 9, weight: .bold))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.75)
                                         .foregroundStyle(GameTheme.muted)
                                     Text(date.formatted(.dateTime.day()))
                                         .font(.system(size: 16, weight: .black, design: .rounded))
@@ -90,7 +91,7 @@ struct DailyChallengesScreen: View {
                                         .font(.system(size: 13, weight: .semibold))
                                         .foregroundStyle(achieved ? GameTheme.yellow : GameTheme.muted.opacity(0.4))
                                 }
-                                .frame(maxWidth: .infinity)
+                                .frame(width: max(32, (screen.size.width - 42 - 24) / 7))
                                 .padding(.vertical, 14)
                                 .background(GameTheme.panel, in: RoundedRectangle(cornerRadius: 12))
                                 .overlay {
@@ -115,7 +116,11 @@ struct DailyChallengesScreen: View {
                     .background(GameTheme.recessed, in: RoundedRectangle(cornerRadius: 18))
                 }
                 .padding(21)
+                .frame(width: screen.size.width, alignment: .topLeading)
             }
+            .frame(width: screen.size.width, height: screen.size.height)
+            .background { GameBackdrop() }
+            .clipped()
         }
         .toolbar(.hidden, for: .navigationBar)
     }

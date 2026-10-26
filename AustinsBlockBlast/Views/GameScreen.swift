@@ -129,7 +129,6 @@ struct GameScreen: View {
         GeometryReader { geometry in
             let boardWidth = min(geometry.size.width - 48, geometry.size.height * 0.445, 460)
             ZStack {
-                GameBackdrop()
                 VStack(spacing: 11) {
                     header
                     statsBar
@@ -154,6 +153,7 @@ struct GameScreen: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+                .frame(width: geometry.size.width, height: geometry.size.height)
 
                 // The moving piece is drawn above the entire game view so it cannot
                 // get clipped by the three slots or hidden behind the board.
@@ -168,6 +168,9 @@ struct GameScreen: View {
                 }
                 if game.isOver { endOverlay.zIndex(10) }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .background { GameBackdrop() }
+            .clipped()
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden()
