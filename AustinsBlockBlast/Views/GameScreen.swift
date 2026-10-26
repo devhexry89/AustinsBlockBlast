@@ -20,19 +20,20 @@ private struct GameTouchLayer: UIViewRepresentable {
 
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
             // The overlay allows buttons, menus, and everything except tray pieces
-            // to receive their normal touches. `point` is already in self's bounds.
-            guard trackedTouch == nil else { return false }
-            return frames.values.contains { $0.contains(point) }
+            // to receive their normal touches.
+            guard trackedTouch == nil, let window else { return false }
+            let position = convert(point, to: window)
+            return frames.values.contains { $0.contains(position) }
         }
 
         private func report(_ phase: TouchPhase, touch: UITouch) {
             guard let slot = trackedSlot else { return }
-            callback(slot, phase, touch.location(in: self))
+            callback(slot, phase, touch.location(in: window ?? self))
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             guard trackedTouch == nil, let touch = touches.first else { return }
-            let position = touch.location(in: self)
+            let position = touch.location(in: window ?? self)
             guard let slot = frames.keys.sorted().first(where: { frames[$0]?.contains(position) == true }) else { return }
             trackedSlot = slot
             trackedTouch = touch
@@ -84,6 +85,38 @@ private struct BoardRectPreference: PreferenceKey {
     static var defaultValue: CGRect = .zero
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         value = nextValue()
+    }
+}
+
+// Reports its own frame in the UIWindow's coord space on every layout pass.
+// UIKit always knows where its views live, so this works where SwiftUI
+// preferences and GeometryReaders have been failing in this hierarchy.
+private struct FrameReporter: UIViewRepresentable {
+    let onFrame: (CGRect) -> Void
+
+    func makeUIView(context: Context) -> Reporter {
+        let v = Reporter()
+        v.onFrameChange = onFrame
+        v.isUserInteractionEnabled = false
+        v.backgroundColor = .clear
+        return v
+    }
+
+    func updateUIView(_ uiView: Reporter, context: Context) {
+        uiView.onFrameChange = onFrame
+    }
+
+    final class Reporter: UIView {
+        var onFrameChange: ((CGRect) -> Void)?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let window else { return }
+            let rect = convert(bounds, to: window)
+            DispatchQueue.main.async { [weak self] in
+                self?.onFrameChange?(rect)
+            }
+        }
     }
 }
 
@@ -209,10 +242,9 @@ struct GameScreen: View {
     @State private var boardBurst = false
     @State private var effectGeneration = 0
 
-    // All touch points and measured element frames live in the ZStack's local
-    // coordinate space, exposed as a named "game" space. One parent-level gesture
-    // owns the entire drag lifecycle, even beyond the tray.
-    static let gameSpace = "game"
+    // All touch points and measured element frames live in the UIWindow's
+    // coordinate space. One parent-level gesture owns the entire drag lifecycle,
+    // even beyond the tray.
     private let fingerLift: CGFloat = 74
     private let cellGap: CGFloat = 3
 
@@ -239,14 +271,7 @@ struct GameScreen: View {
                               onCellTap: tappedBoard, clearedRows: clearingRows,
                               clearedColumns: clearingColumns, boardBurst: boardBurst)
                         .frame(width: boardWidth, height: boardWidth)
-                        .background(
-                            GeometryReader { view in
-                                Color.clear
-                                    .preference(key: BoardRectPreference.self,
-                                                value: view.frame(in: .named(GameScreen.gameSpace)))
-                            }
-                        )
-                        .onPreferenceChange(BoardRectPreference.self) { boardRect = $0 }
+                        .background(FrameReporter { boardRect = $0 })
                         .padding(7)
                         .background(GameTheme.panel, in: RoundedRectangle(cornerRadius: 17))
                         .overlay {
@@ -271,7 +296,7 @@ struct GameScreen: View {
                     Spacer(minLength: 0)
                     trayView(availableWidth: geometry.size.width - 32)
                     toolbar
-                    Text("TE 1.4 • \(touchStatus) • R \(Int(boardRect.minX)),\(Int(boardRect.minY)) \(Int(boardRect.width))×\(Int(boardRect.height))")
+                    Text("TE 1.5 • \(touchStatus) • R \(Int(boardRect.minX)),\(Int(boardRect.minY)) \(Int(boardRect.width))×\(Int(boardRect.height))")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(GameTheme.muted)
                         .frame(maxWidth: .infinity)
@@ -290,6 +315,8 @@ struct GameScreen: View {
                             hover.map { snapCenter(for: $0, shape: shape) }
                             ?? CGPoint(x: dragPosition.x, y: dragPosition.y - fingerLift)
                         )
+                        .offset(x: -geometry.frame(in: .global).minX,
+                                y: -geometry.frame(in: .global).minY)
                         .allowsHitTesting(false)
                         .zIndex(5)
                 }
@@ -300,7 +327,6 @@ struct GameScreen: View {
                 .zIndex(8)
                 if game.isOver { endOverlay.zIndex(10) }
             }
-            .coordinateSpace(name: GameScreen.gameSpace)
             .onPreferenceChange(TrayFramesPreference.self) { trayFrames = $0 }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background { GameBackdrop() }
@@ -401,7 +427,7 @@ struct GameScreen: View {
                 .background(GeometryReader { marker in
                     Color.clear.preference(
                         key: TrayFramesPreference.self,
-                        value: shape == nil ? [:] : [slot: marker.frame(in: .named(GameScreen.gameSpace))]
+                        value: shape == nil ? [:] : [slot: marker.frame(in: .global)]
                     )
                 })
                 .contentShape(RoundedRectangle(cornerRadius: 18))
