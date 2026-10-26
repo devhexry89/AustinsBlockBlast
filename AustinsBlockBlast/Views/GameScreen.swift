@@ -195,6 +195,8 @@ struct GameScreen: View {
     @State private var selectedSlot: Int?
     @State private var dragSlot: Int?
     @State private var hover: GridPoint?
+    @State private var lastLegalHover: GridPoint?
+    @State private var didMoveOnThisTouch = false
     @State private var boardRect = CGRect.zero
     @State private var trayFrames: [Int: CGRect] = [:]
     @State private var touchStatus = "READY"
@@ -490,6 +492,42 @@ struct GameScreen: View {
         )
     }
 
+    // The snapping and commit logic both use the same anchor.
+    private func updateDrag(slot: Int, shape: BlockShape, at location: CGPoint) {
+        dragPosition = location
+        let candidate = proposedOrigin(at: location, shape: shape)
+        hover = candidate
+        if let candidate, game.canPlace(slot: slot, x: candidate.x, y: candidate.y) {
+            lastLegalHover = candidate
+            touchStatus = "VALID \\(candidate.x),\\(candidate.y)"
+        } else {
+            lastLegalHover = nil
+            touchStatus = candidate == nil ? "OUTSIDE BOARD" : "BLOCKED"
+        }
+    }
+
+    private func finishDrag(slot: Int, shape: BlockShape, at location: CGPoint, cancelled: Bool) {
+        // Use the position the user last saw, not a new snap computed on release.
+        // Touch cancellation caused by iOS/system handling may still finish a
+        // valid drag; never silently discard a green preview.
+        let final = lastLegalHover
+        let hadMove = didMoveOnThisTouch
+        clearDrag()
+        selectedSlot = nil
+
+        guard hadMove else {
+            touchStatus = "TAP"
+            return
+        }
+        if let final, game.canPlace(slot: slot, x: final.x, y: final.y) {
+            place(slot: slot, at: final)
+            touchStatus = "PLACED \\(final.x),\\(final.y)"
+        } else {
+            touchStatus = cancelled ? "CANCELLED / NO VALID SPOT" : "RELEASED / NO VALID SPOT"
+            // Do not make the error noise for a drop outside the board.
+        }
+    }
+
     private func handlePieceTouch(slot: Int, phase: GameTouchLayer.TouchPhase, location: CGPoint) {
         guard !game.isOver, let shape = game.shape(in: slot) else {
             clearDrag()
@@ -497,40 +535,23 @@ struct GameScreen: View {
         }
         switch phase {
         case .began:
-            touchStatus = "START \(slot + 1)"
             selectedSlot = slot
             dragSlot = slot
-            dragPosition = location
-            hover = proposedOrigin(at: location, shape: shape)
+            lastLegalHover = nil
+            didMoveOnThisTouch = false
+            touchStatus = "START \\(slot + 1)"
+            updateDrag(slot: slot, shape: shape, at: location)
             store.selectPiece()
         case .moved:
-            touchStatus = "MOVING \(slot + 1)"
             guard dragSlot == slot else { return }
-            dragPosition = location
-            hover = proposedOrigin(at: location, shape: shape)
+            didMoveOnThisTouch = true
+            updateDrag(slot: slot, shape: shape, at: location)
         case .ended:
-            touchStatus = "RELEASED \(slot + 1)"
             guard dragSlot == slot else { return }
-            // Commit the SAME legal anchor that was previewed on the board.
-            // Never silently turn a visible red/invalid preview into a move.
-            let target = proposedOrigin(at: location, shape: shape)
-            let valid = target.flatMap { anchor in
-                game.canPlace(slot: slot, x: anchor.x, y: anchor.y) ? anchor : nil
-            }
-            clearDrag()
-            if let valid {
-                touchStatus = "PLACED \(valid.x),\(valid.y)"
-                place(slot: slot, at: valid)
-            } else if target != nil {
-                touchStatus = "BLOCKED"
-                store.invalidDrop()
-            } else {
-                touchStatus = "OUTSIDE BOARD"
-                selectedSlot = nil
-            }
+            finishDrag(slot: slot, shape: shape, at: location, cancelled: false)
         case .cancelled:
-            touchStatus = "CANCELLED"
-            clearDrag()
+            guard dragSlot == slot else { return }
+            finishDrag(slot: slot, shape: shape, at: location, cancelled: true)
         }
     }
 
@@ -538,11 +559,12 @@ struct GameScreen: View {
         dragSlot = nil
         dragPosition = nil
         hover = nil
+        lastLegalHover = nil
+        didMoveOnThisTouch = false
     }
 
     private func tappedBoard(_ cell: GridPoint) {
-        guard let selectedSlot else { return }
-        place(slot: selectedSlot, at: cell)
+        // Placement occurs only on release of a drag.
     }
 
     private func place(slot: Int, at point: GridPoint) {
