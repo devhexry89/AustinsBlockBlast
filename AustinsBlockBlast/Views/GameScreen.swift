@@ -127,7 +127,7 @@ struct GameScreen: View {
 
     // Board coordinates and touch locations are measured in the same GLOBAL space,
     // rather than mixing a tray-local gesture point with a board-relative frame.
-    private let fingerLift: CGFloat = 78
+    private let fingerLift: CGFloat = 74
     private let cellGap: CGFloat = 3
 
     init(mode: PlayMode, dayKey: String? = nil) {
@@ -193,8 +193,10 @@ struct GameScreen: View {
                     let gridCell = max(14, (boardWidth - CGFloat(game.side - 1) * cellGap) / CGFloat(game.side))
                     LiftedPiecePreview(shape: shape, cellSize: gridCell + cellGap)
                         .opacity(0.93)
-                        .position(x: dragPosition.x,
-                                  y: dragPosition.y - fingerLift)
+                        .position(
+                            hover.map { snapCenter(for: $0, shape: shape) }
+                            ?? CGPoint(x: dragPosition.x, y: dragPosition.y - fingerLift)
+                        )
                         .allowsHitTesting(false)
                         .zIndex(5)
                 }
@@ -288,6 +290,7 @@ struct GameScreen: View {
                                       lineWidth: selectedSlot == slot ? 2 : 1)
                     if let shape {
                         PiecePreview(shape: shape, availableWidth: slotWidth - 10)
+                            .opacity(dragSlot == slot ? 0.22 : 1)
                     } else {
                         Image(systemName: "checkmark")
                             .foregroundStyle(GameTheme.green.opacity(0.6))
@@ -388,31 +391,33 @@ struct GameScreen: View {
         }
     }
 
-    private func proposedOrigin(at location: CGPoint, shape: BlockShape) -> GridPoint? {
-        guard boardRect.width > 1, boardRect.height > 1, game.side > 0 else { return nil }
-        let cellPitch = boardRect.width / CGFloat(game.side)
-        // The center of the piece rides above the fingertip, just like a
-        // block-fitting puzzle. Use the SAME anchor during preview and drop.
-        let lifted = CGPoint(x: location.x, y: location.y - fingerLift)
-        let shapeHalfWidth = CGFloat(shape.width) * cellPitch / 2
-        let shapeHalfHeight = CGFloat(shape.height) * cellPitch / 2
-        let x = Int(round((lifted.x - boardRect.minX - shapeHalfWidth) / cellPitch))
-        let y = Int(round((lifted.y - boardRect.minY - shapeHalfHeight) / cellPitch))
-        // The lifted position takes priority, but also accept a finger directly
-        // on the board if the player drags the piece without lifting their thumb
-        // high enough. Both paths calculate whole-piece, not single-cell, anchors.
-        if x >= 0, y >= 0,
-           x + shape.width <= game.side, y + shape.height <= game.side {
-            return GridPoint(x: x, y: y)
-        }
-        let touchX = Int(round((location.x - boardRect.minX - shapeHalfWidth) / cellPitch))
-        let touchY = Int(round((location.y - boardRect.minY - shapeHalfHeight) / cellPitch))
-        if touchX >= 0, touchY >= 0,
-           touchX + shape.width <= game.side,
-           touchY + shape.height <= game.side {
-            return GridPoint(x: touchX, y: touchY)
-        }
-        return nil
+    // Both the visual ghost and final placement use this exact projection.
+    // The fingertip lives in the named gameArea coordinate space, as does boardRect.
+    private func proposedOrigin(at finger: CGPoint, shape: BlockShape) -> GridPoint? {
+        guard boardRect.width > 0, boardRect.height > 0, game.side > 0 else { return nil }
+
+        let pitch = (boardRect.width + cellGap) / CGFloat(game.side)
+        let center = CGPoint(x: finger.x, y: finger.y - fingerLift)
+
+        // The drag cursor is the CENTER of the lifted shape, not its top-left cell.
+        let left = center.x - CGFloat(shape.width) * pitch * 0.5
+        let top = center.y - CGFloat(shape.height) * pitch * 0.5
+        let x = Int(round((left - boardRect.minX) / pitch))
+        let y = Int(round((top - boardRect.minY) / pitch))
+
+        // Never place a piece partially outside the board. A ghost may still be
+        // shown in red over invalid cells, but it will not consume the piece.
+        guard x >= 0, y >= 0, x + shape.width <= game.side,
+              y + shape.height <= game.side else { return nil }
+        return GridPoint(x: x, y: y)
+    }
+
+    private func snapCenter(for anchor: GridPoint, shape: BlockShape) -> CGPoint {
+        let pitch = (boardRect.width + cellGap) / CGFloat(game.side)
+        return CGPoint(
+            x: boardRect.minX + (CGFloat(anchor.x) + CGFloat(shape.width) / 2) * pitch - cellGap / 2,
+            y: boardRect.minY + (CGFloat(anchor.y) + CGFloat(shape.height) / 2) * pitch - cellGap / 2
+        )
     }
 
     private func clearDrag() {
