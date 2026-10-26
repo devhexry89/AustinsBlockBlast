@@ -3,6 +3,9 @@ import UIKit
 
 // UIKit owns the touch for its full lifetime, even when the finger leaves the tray.
 // This avoids SwiftUI parent/child gesture competition and keeps one coordinate space.
+// All reported locations are in the Surface view's OWN local coord space, which --
+// because the Surface fills the ZStack that owns the "game" named coord space --
+// matches the frames in which trayFrames and boardRect are measured.
 private struct GameTouchLayer: UIViewRepresentable {
     let trayFrames: [Int: CGRect]
     let onTouch: (Int, TouchPhase, CGPoint) -> Void
@@ -17,20 +20,19 @@ private struct GameTouchLayer: UIViewRepresentable {
 
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
             // The overlay allows buttons, menus, and everything except tray pieces
-            // to receive their normal touches.
-            guard trackedTouch == nil, let window else { return false }
-            let position = convert(point, to: window)
-            return frames.values.contains { $0.contains(position) }
+            // to receive their normal touches. `point` is already in self's bounds.
+            guard trackedTouch == nil else { return false }
+            return frames.values.contains { $0.contains(point) }
         }
 
         private func report(_ phase: TouchPhase, touch: UITouch) {
             guard let slot = trackedSlot else { return }
-            callback(slot, phase, touch.location(in: window ?? self))
+            callback(slot, phase, touch.location(in: self))
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             guard trackedTouch == nil, let touch = touches.first else { return }
-            let position = touch.location(in: window ?? self)
+            let position = touch.location(in: self)
             guard let slot = frames.keys.sorted().first(where: { frames[$0]?.contains(position) == true }) else { return }
             trackedSlot = slot
             trackedTouch = touch
@@ -207,8 +209,10 @@ struct GameScreen: View {
     @State private var boardBurst = false
     @State private var effectGeneration = 0
 
-    // All touch points and measured element frames use the global coordinate system.
-    // One parent-level gesture owns the entire drag lifecycle, even beyond the tray.
+    // All touch points and measured element frames live in the ZStack's local
+    // coordinate space, exposed as a named "game" space. One parent-level gesture
+    // owns the entire drag lifecycle, even beyond the tray.
+    static let gameSpace = "game"
     private let fingerLift: CGFloat = 74
     private let cellGap: CGFloat = 3
 
@@ -239,7 +243,7 @@ struct GameScreen: View {
                             GeometryReader { view in
                                 Color.clear
                                     .preference(key: BoardRectPreference.self,
-                                                value: view.frame(in: .global))
+                                                value: view.frame(in: .named(GameScreen.gameSpace)))
                             }
                         )
                         .onPreferenceChange(BoardRectPreference.self) { boardRect = $0 }
@@ -267,7 +271,7 @@ struct GameScreen: View {
                     Spacer(minLength: 0)
                     trayView(availableWidth: geometry.size.width - 32)
                     toolbar
-                    Text("TOUCH ENGINE 1.3 • \(touchStatus)")
+                    Text("TE 1.4 • \(touchStatus) • R \(Int(boardRect.minX)),\(Int(boardRect.minY)) \(Int(boardRect.width))×\(Int(boardRect.height))")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(GameTheme.muted)
                         .frame(maxWidth: .infinity)
@@ -286,8 +290,6 @@ struct GameScreen: View {
                             hover.map { snapCenter(for: $0, shape: shape) }
                             ?? CGPoint(x: dragPosition.x, y: dragPosition.y - fingerLift)
                         )
-                        .offset(x: -geometry.frame(in: .global).minX,
-                                y: -geometry.frame(in: .global).minY)
                         .allowsHitTesting(false)
                         .zIndex(5)
                 }
@@ -298,6 +300,7 @@ struct GameScreen: View {
                 .zIndex(8)
                 if game.isOver { endOverlay.zIndex(10) }
             }
+            .coordinateSpace(name: GameScreen.gameSpace)
             .onPreferenceChange(TrayFramesPreference.self) { trayFrames = $0 }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background { GameBackdrop() }
@@ -398,7 +401,7 @@ struct GameScreen: View {
                 .background(GeometryReader { marker in
                     Color.clear.preference(
                         key: TrayFramesPreference.self,
-                        value: shape == nil ? [:] : [slot: marker.frame(in: .global)]
+                        value: shape == nil ? [:] : [slot: marker.frame(in: .named(GameScreen.gameSpace))]
                     )
                 })
                 .contentShape(RoundedRectangle(cornerRadius: 18))
