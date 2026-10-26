@@ -1,16 +1,48 @@
 import SwiftUI
+import UIKit
+
+// UIKit owns the touch for its full lifetime, even when the finger leaves the tray.
+// This avoids SwiftUI parent/child gesture competition and keeps one coordinate space.
+private struct PieceTouchSurface: UIViewRepresentable {
+    let onTouch: (TouchPhase, CGPoint) -> Void
+
+    enum TouchPhase { case began, moved, ended, cancelled }
+
+    final class Surface: UIView {
+        var callback: (TouchPhase, CGPoint) -> Void = { _, _ in }
+        private func point(_ touch: UITouch) -> CGPoint {
+            // .global SwiftUI frames and UIWindow touch coordinates agree in this scene.
+            touch.location(in: window ?? self)
+        }
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let touch = touches.first { callback(.began, point(touch)) }
+        }
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let touch = touches.first { callback(.moved, point(touch)) }
+        }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let touch = touches.first { callback(.ended, point(touch)) }
+        }
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let touch = touches.first { callback(.cancelled, point(touch)) }
+        }
+    }
+
+    func makeUIView(context: Context) -> Surface {
+        let surface = Surface(frame: .zero)
+        surface.isMultipleTouchEnabled = false
+        surface.backgroundColor = .clear
+        surface.isUserInteractionEnabled = true
+        surface.callback = onTouch
+        return surface
+    }
+    func updateUIView(_ view: Surface, context: Context) { view.callback = onTouch }
+}
 
 private struct BoardRectPreference: PreferenceKey {
     static var defaultValue: CGRect = .zero
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         value = nextValue()
-    }
-}
-
-private struct TrayFramesPreference: PreferenceKey {
-    static var defaultValue: [Int: CGRect] = [:]
-    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
@@ -125,7 +157,6 @@ struct GameScreen: View {
     @State private var dragSlot: Int?
     @State private var hover: GridPoint?
     @State private var boardRect = CGRect.zero
-    @State private var trayRects: [Int: CGRect] = [:]
     @State private var dragPosition: CGPoint?
     @State private var showRestart = false
     @State private var clearingRows: Set<Int> = []
@@ -189,7 +220,6 @@ struct GameScreen: View {
                         }
                     Spacer(minLength: 0)
                     trayView(availableWidth: geometry.size.width - 32)
-                        .onPreferenceChange(TrayFramesPreference.self) { trayRects = $0 }
                     toolbar
                 }
                 .padding(.horizontal, 16)
@@ -216,15 +246,6 @@ struct GameScreen: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background { GameBackdrop() }
             .contentShape(Rectangle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                    .onChanged { value in
-                        handleDragChanged(value)
-                    }
-                    .onEnded { value in
-                        handleDragEnded(value)
-                    }
-            )
             .clipped()
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -318,17 +339,12 @@ struct GameScreen: View {
                     }
                 }
                 .frame(width: slotWidth, height: 87)
-                .background(GeometryReader { trayFrame in
-                    Color.clear.preference(
-                        key: TrayFramesPreference.self,
-                        value: [slot: trayFrame.frame(in: .global)]
-                    )
-                })
                 .contentShape(RoundedRectangle(cornerRadius: 18))
-                .onTapGesture {
+                .overlay {
                     if shape != nil {
-                        selectedSlot = slot
-                        store.selectPiece()
+                        PieceTouchSurface { phase, point in
+                            handlePieceTouch(slot: slot, phase: phase, location: point)
+                        }
                     }
                 }
                 .accessibilityLabel(shape.map { "Piece \(slot + 1), \($0.cells.count) blocks" } ?? "Empty piece slot")
@@ -415,40 +431,34 @@ struct GameScreen: View {
         )
     }
 
-    private func dragSlotForTouch(_ start: CGPoint) -> Int? {
-        (0..<3).first { slot in
-            guard let rect = trayRects[slot], game.shape(in: slot) != nil else { return false }
-            return rect.insetBy(dx: -4, dy: -8).contains(start)
-        }
-    }
-
-    private func handleDragChanged(_ value: DragGesture.Value) {
-        guard !game.isOver else { return }
-        guard let slot = dragSlot ?? dragSlotForTouch(value.startLocation),
-              let shape = game.shape(in: slot) else { return }
-        if dragSlot == nil {
-            selectedSlot = slot
-            dragSlot = slot
-            store.selectPiece()
-        }
-        dragPosition = value.location
-        hover = proposedOrigin(at: value.location, shape: shape)
-    }
-
-    private func handleDragEnded(_ value: DragGesture.Value) {
-        guard let slot = dragSlot,
-              let shape = game.shape(in: slot), !game.isOver else {
+    private func handlePieceTouch(slot: Int, phase: PieceTouchSurface.TouchPhase, location: CGPoint) {
+        guard !game.isOver, let shape = game.shape(in: slot) else {
             clearDrag()
             return
         }
-        let moved = hypot(value.translation.width, value.translation.height)
-        let target = moved > 8 ? proposedOrigin(at: value.location, shape: shape) : nil
-        clearDrag()
-        if let target {
-            // The exact same candidate used for the visual preview is committed.
-            place(slot: slot, at: target)
-        } else if moved > 8 {
-            store.invalidDrop()
+        switch phase {
+        case .began:
+            selectedSlot = slot
+            dragSlot = slot
+            dragPosition = location
+            hover = proposedOrigin(at: location, shape: shape)
+            store.selectPiece()
+        case .moved:
+            guard dragSlot == slot else { return }
+            dragPosition = location
+            hover = proposedOrigin(at: location, shape: shape)
+        case .ended:
+            guard dragSlot == slot else { return }
+            let target = proposedOrigin(at: location, shape: shape)
+            clearDrag()
+            if let target {
+                place(slot: slot, at: target)
+            } else {
+                // Tapping can still select a piece for accessibility.
+                selectedSlot = slot
+            }
+        case .cancelled:
+            clearDrag()
         }
     }
 
